@@ -31,6 +31,7 @@ fun TrackingScreen(
     namaBus:       String,
     armadaNomor:   String,
     ruteNama:      String,
+    kapasitasAwal: Int = 40,   // ✅ FIX: kapasitas dari navigasi, bukan cuma default hardcode
     vm: TrackingViewModel = viewModel()
 ) {
     val uiState         by vm.uiState.collectAsState()
@@ -49,7 +50,9 @@ fun TrackingScreen(
     val origin = parts.getOrNull(0)?.trim()?.uppercase() ?: "ASAL"
     val dest   = parts.getOrNull(1)?.trim()?.uppercase() ?: "TUJUAN"
 
-    LaunchedEffect(perjalanId) { vm.init(perjalanId) }
+    // ✅ FIX: kapasitasAwal diteruskan ke ViewModel.init() supaya nilai sudah benar
+    // sejak frame pertama, tidak menunggu loadPerjalananAktif() selesai/berhasil
+    LaunchedEffect(perjalanId) { vm.init(perjalanId, kapasitasAwal) }
 
     DisposableEffect(Unit) { onDispose { vm.unregisterReceiver() } }
 

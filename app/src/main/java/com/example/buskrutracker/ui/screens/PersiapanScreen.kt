@@ -55,7 +55,8 @@ fun PersiapanScreen(
                 navController.navigate(
                     Routes.trackingRoute(
                         state.perjalanId, state.namaBus,
-                        state.armadaNomor, state.ruteNama
+                        state.armadaNomor, state.ruteNama,
+                        state.kapasitas   // ✅ FIX: kapasitas ikut diteruskan ke TrackingScreen
                     )
                 ) { popUpTo(Routes.PERSIAPAN) { inclusive = true } }
                 vm.resetState()

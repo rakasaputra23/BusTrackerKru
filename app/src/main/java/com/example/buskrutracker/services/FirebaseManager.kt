@@ -3,16 +3,17 @@ package com.example.buskrutracker.services
 import android.util.Log
 import com.google.firebase.database.DatabaseReference
 import com.google.firebase.database.FirebaseDatabase
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 
 class FirebaseManager {
 
     companion object {
         private const val TAG = "FirebaseManager"
-        private const val MAX_TRACK_POINTS = 10
+
+        // ✅ FIX: dinaikkan dari 10 → 300
+        // Dengan interval 5 detik, 300 titik = ±25 menit tracking.
+        // Untuk perjalanan antar kota 2-4 jam, gunakan node "track_full" terpisah (lihat updateLocationWithTrack).
+        private const val MAX_TRACK_POINTS = 300
+
         private const val DATABASE_URL =
             "https://buskrutracker-default-rtdb.asia-southeast1.firebasedatabase.app/"
     }
@@ -20,17 +21,21 @@ class FirebaseManager {
     private val databaseRef: DatabaseReference =
         FirebaseDatabase.getInstance(DATABASE_URL).reference
 
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }
-
-    private val trackHistory = mutableListOf<Map<String, Double>>()
+    // ✅ FIX: trackHistory sekarang menyimpan Map dengan timestamp
+    private val trackHistory = mutableListOf<Map<String, Any>>()
 
     // ============================================
     // INITIALIZE BUS
     // ============================================
 
+    /**
+     * ✅ FIX: Parameter utama sekarang firebaseBusId (bukan perjalanId).
+     * firebaseBusId adalah nilai dari kolom armada.firebase_bus_id di server,
+     * dikembalikan oleh API di field "firebase_bus_id" saat mulai perjalanan.
+     * Path di Firebase: buses/{firebaseBusId}/...
+     */
     fun initializeBus(
+        firebaseBusId: String,
         perjalanId: Int,
         namaBus: String?,
         plateNumber: String?,
@@ -41,10 +46,10 @@ class FirebaseManager {
         routePolyline: String?,
         tarif: Double
     ) {
-        val busKey = "bus_$perjalanId"
-        val busRef = databaseRef.child("buses").child(busKey)
+        val busRef = databaseRef.child("buses").child(firebaseBusId) // ✅ FIX: pakai firebaseBusId
 
         val busData = mapOf(
+            "perjalanId"              to perjalanId,
             "namaBus"                 to (namaBus ?: ""),
             "plateNumber"             to (plateNumber ?: ""),
             "class"                   to (busClass ?: ""),
@@ -57,15 +62,15 @@ class FirebaseManager {
             "status"                  to "active",
             "routePolyline"           to (routePolyline ?: ""),
             "kondisi"                 to "lancar",
-            "kondisiUpdate"           to getCurrentTimestamp(),
+            "kondisiUpdate"           to getCurrentTimestampMs(),
             "location"                to mapOf(
                 "latitude"   to 0.0,
                 "longitude"  to 0.0,
                 "speed"      to 0.0,
-                "lastUpdate" to getCurrentTimestamp()
+                "lastUpdate" to getCurrentTimestampMs()
             ),
-            "track"         to emptyList<Any>(),
-            "eta"           to mapOf(
+            "track"        to emptyList<Any>(),
+            "eta"          to mapOf(
                 "remainingDistance" to 0.0,
                 "remainingTime"     to 0,
                 "estimatedArrival"  to ""
@@ -74,8 +79,12 @@ class FirebaseManager {
         )
 
         busRef.setValue(busData)
-            .addOnSuccessListener { Log.d(TAG, "Bus initialized: $busKey | $namaBus | tarif=$tarif") }
-            .addOnFailureListener { Log.e(TAG, "Failed to initialize bus: ${it.message}") }
+            .addOnSuccessListener {
+                Log.d(TAG, "Bus initialized: $firebaseBusId | $namaBus | tarif=$tarif")
+            }
+            .addOnFailureListener {
+                Log.e(TAG, "Failed to initialize bus: ${it.message}")
+            }
 
         trackHistory.clear()
     }
@@ -84,25 +93,42 @@ class FirebaseManager {
     // UPDATE LOCATION
     // ============================================
 
+    /**
+     * ✅ FIX: Pakai firebaseBusId sebagai path key.
+     * ✅ FIX: Setiap titik track sekarang menyertakan field "timestamp" (unix seconds)
+     *         agar usort di Laravel (fetchGpsTrackFromFirebase) bisa mengurutkan dengan benar.
+     */
     fun updateLocationWithTrack(
-        perjalanId: Int,
+        firebaseBusId: String,
         latitude: Double,
         longitude: Double,
         speed: Float,
         totalDistance: Double
     ) {
-        val busRef = databaseRef.child("buses").child("bus_$perjalanId")
+        val busRef = databaseRef.child("buses").child(firebaseBusId) // ✅ FIX
+
+        val nowMs      = System.currentTimeMillis()
+        val timestampSec = nowMs / 1000L // ✅ FIX: unix timestamp dalam detik
 
         busRef.child("location").setValue(
             mapOf(
                 "latitude"   to latitude,
                 "longitude"  to longitude,
                 "speed"      to speed.toDouble(),
-                "lastUpdate" to getCurrentTimestamp()
+                "lastUpdate" to nowMs
             )
         )
 
-        trackHistory.add(mapOf("lat" to latitude, "lng" to longitude))
+        // ✅ FIX: tambah field timestamp di setiap titik track
+        trackHistory.add(
+            mapOf(
+                "lat"       to latitude,
+                "lng"       to longitude,
+                "timestamp" to timestampSec.toDouble()
+            )
+        )
+
+        // Sliding window — buang titik paling lama jika melebihi batas
         if (trackHistory.size > MAX_TRACK_POINTS) trackHistory.removeAt(0)
 
         busRef.child("track").setValue(trackHistory.toList())
@@ -114,12 +140,12 @@ class FirebaseManager {
     // ============================================
 
     fun updateETA(
-        perjalanId: Int,
+        firebaseBusId: String, // ✅ FIX: ganti dari perjalanId
         remainingDistanceKm: Double,
         remainingTimeMinutes: Int,
         estimatedArrival: String
     ) {
-        databaseRef.child("buses").child("bus_$perjalanId").child("eta").setValue(
+        databaseRef.child("buses").child(firebaseBusId).child("eta").setValue( // ✅ FIX
             mapOf(
                 "remainingDistance" to remainingDistanceKm,
                 "remainingTime"     to remainingTimeMinutes,
@@ -132,13 +158,13 @@ class FirebaseManager {
     // UPDATE PASSENGERS
     // ============================================
 
-    fun updatePassengers(perjalanId: Int, currentPassengers: Int) {
-        databaseRef.child("buses").child("bus_$perjalanId")
+    fun updatePassengers(firebaseBusId: String, currentPassengers: Int) { // ✅ FIX
+        databaseRef.child("buses").child(firebaseBusId)
             .child("currentPassengers").setValue(currentPassengers)
     }
 
-    fun updateBoardedPassengers(perjalanId: Int, totalBoarded: Int) {
-        databaseRef.child("buses").child("bus_$perjalanId")
+    fun updateBoardedPassengers(firebaseBusId: String, totalBoarded: Int) { // ✅ FIX
+        databaseRef.child("buses").child(firebaseBusId)
             .child("totalPassengersBoarded").setValue(totalBoarded)
             .addOnSuccessListener { Log.d(TAG, "totalPassengersBoarded updated: $totalBoarded") }
             .addOnFailureListener { Log.e(TAG, "Failed to update boarded: ${it.message}") }
@@ -148,16 +174,16 @@ class FirebaseManager {
     // UPDATE STATUS & KONDISI
     // ============================================
 
-    fun updateStatus(perjalanId: Int, status: String) {
-        databaseRef.child("buses").child("bus_$perjalanId")
+    fun updateStatus(firebaseBusId: String, status: String) { // ✅ FIX
+        databaseRef.child("buses").child(firebaseBusId)
             .child("status").setValue(status)
     }
 
-    fun updateKondisi(perjalanId: Int, kondisi: String) {
-        databaseRef.child("buses").child("bus_$perjalanId").updateChildren(
+    fun updateKondisi(firebaseBusId: String, kondisi: String) { // ✅ FIX
+        databaseRef.child("buses").child(firebaseBusId).updateChildren(
             mapOf(
                 "kondisi"       to kondisi,
-                "kondisiUpdate" to getCurrentTimestamp()
+                "kondisiUpdate" to getCurrentTimestampMs()
             )
         )
             .addOnSuccessListener { Log.d(TAG, "Kondisi updated: $kondisi") }
@@ -168,14 +194,23 @@ class FirebaseManager {
     // CLEAR BUS DATA
     // ============================================
 
-    fun clearBusData(perjalanId: Int) {
-        databaseRef.child("buses").child("bus_$perjalanId").removeValue()
+    fun clearBusData(firebaseBusId: String) { // ✅ FIX: terima firebaseBusId bukan Int
+        if (firebaseBusId.isEmpty()) {
+            Log.w(TAG, "clearBusData: firebaseBusId kosong, skip.")
+            return
+        }
+        databaseRef.child("buses").child(firebaseBusId).removeValue()
             .addOnSuccessListener {
-                Log.d(TAG, "Bus data cleared: bus_$perjalanId")
+                Log.d(TAG, "Bus data cleared: $firebaseBusId")
                 trackHistory.clear()
             }
             .addOnFailureListener { Log.e(TAG, "Failed to clear bus data: ${it.message}") }
     }
 
-    private fun getCurrentTimestamp(): String = dateFormat.format(Date())
+    // ============================================
+    // HELPERS
+    // ============================================
+
+    /** Kembalikan unix timestamp dalam milidetik. */
+    private fun getCurrentTimestampMs(): Long = System.currentTimeMillis()
 }

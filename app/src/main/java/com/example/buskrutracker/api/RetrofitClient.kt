@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 object RetrofitClient {
 
     // Ganti dengan URL ngrok/server terbaru
-    private const val BASE_URL = "https://862d-2001-448a-5050-54a7-d20-4ff3-327f-f6bc.ngrok-free.app/"
+    private const val BASE_URL = "https://399e-2001-448a-5050-480f-b122-9677-a7a3-62c2.ngrok-free.app/"
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BODY

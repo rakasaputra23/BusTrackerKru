@@ -16,7 +16,11 @@ import androidx.compose.ui.platform.LocalContext
 object Routes {
     const val LOGIN     = "login"
     const val PERSIAPAN = "persiapan"
-    const val TRACKING  = "tracking/{perjalanan_id}/{nama_bus}/{armada_nomor}/{rute_nama}"
+
+    // ✅ FIX: tambah {kapasitas} agar TrackingScreen punya nilai kapasitas
+    // yang benar SEJAK AWAL, tidak bergantung sepenuhnya pada loadPerjalananAktif()
+    const val TRACKING  = "tracking/{perjalanan_id}/{nama_bus}/{armada_nomor}/{rute_nama}/{kapasitas}"
+
     const val LAPORAN   = "laporan/{perjalanan_id}/{nama_bus}/{armada_nomor}/{rute_nama}" +
             "/{total_penumpang}/{total_penumpang_naik}" +
             "/{total_pendapatan}/{tarif_per_orang}" +
@@ -26,8 +30,9 @@ object Routes {
         perjalanId:  Int,
         namaBus:     String,
         armadaNomor: String,
-        ruteNama:    String
-    ) = "tracking/$perjalanId/${namaBus.encode()}/${armadaNomor.encode()}/${ruteNama.encode()}"
+        ruteNama:    String,
+        kapasitas:   Int          // ✅ FIX: parameter baru
+    ) = "tracking/$perjalanId/${namaBus.encode()}/${armadaNomor.encode()}/${ruteNama.encode()}/$kapasitas"
 
     fun laporanRoute(
         perjalanId:        Int,
@@ -75,7 +80,9 @@ fun AppNavigation() {
                 navArgument("perjalanan_id")  { type = NavType.IntType },
                 navArgument("nama_bus")       { type = NavType.StringType },
                 navArgument("armada_nomor")   { type = NavType.StringType },
-                navArgument("rute_nama")      { type = NavType.StringType }
+                navArgument("rute_nama")      { type = NavType.StringType },
+                // ✅ FIX: argument baru untuk kapasitas
+                navArgument("kapasitas")      { type = NavType.IntType; defaultValue = 40 }
             )
         ) { backStack ->
             TrackingScreen(
@@ -83,7 +90,9 @@ fun AppNavigation() {
                 perjalanId    = backStack.arguments?.getInt("perjalanan_id") ?: 0,
                 namaBus       = backStack.arguments?.getString("nama_bus")?.decode() ?: "",
                 armadaNomor   = backStack.arguments?.getString("armada_nomor")?.decode() ?: "",
-                ruteNama      = backStack.arguments?.getString("rute_nama")?.decode() ?: ""
+                ruteNama      = backStack.arguments?.getString("rute_nama")?.decode() ?: "",
+                // ✅ FIX: teruskan kapasitas dari argumen navigasi
+                kapasitasAwal = backStack.arguments?.getInt("kapasitas") ?: 40
             )
         }
 

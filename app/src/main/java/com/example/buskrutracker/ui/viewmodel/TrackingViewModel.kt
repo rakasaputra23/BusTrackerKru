@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.buskrutracker.api.RetrofitClient
@@ -93,19 +94,36 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
     // INIT
     // ============================================
 
-    fun init(perjalanId: Int) {
+    // ✅ FIX: tambah parameter kapasitasAwal (default 40 agar tetap backward-compatible),
+    // supaya kapasitas dari navigasi langsung terpasang sejak frame pertama,
+    // tidak menunggu loadPerjalananAktif() selesai/berhasil.
+    fun init(perjalanId: Int, kapasitasAwal: Int = 40) {
         this.perjalanId = perjalanId
+        _kapasitas.value = kapasitasAwal
         restoreBoardedCount()
         registerReceiver()
         loadPerjalananAktif()
     }
 
+    // ✅ FIX: di Android 13+ (API 33 / TIRAMISU), registerReceiver() untuk broadcast
+    // internal wajib menyertakan flag RECEIVER_EXPORTED / RECEIVER_NOT_EXPORTED.
+    // Karena broadcast "GPS_LOCATION_UPDATE" ini hanya dikirim dari dalam app sendiri
+    // (GpsTrackingService), dipakai RECEIVER_NOT_EXPORTED (lebih aman, tidak bisa
+    // diakses app lain).
     private fun registerReceiver() {
         try {
-            context.registerReceiver(
-                locationReceiver,
-                IntentFilter("GPS_LOCATION_UPDATE")
-            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(
+                    locationReceiver,
+                    IntentFilter("GPS_LOCATION_UPDATE"),
+                    Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                context.registerReceiver(
+                    locationReceiver,
+                    IntentFilter("GPS_LOCATION_UPDATE")
+                )
+            }
         } catch (_: Exception) {}
     }
 

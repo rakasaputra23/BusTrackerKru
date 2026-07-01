@@ -50,15 +50,22 @@ class GpsTrackingService : Service() {
         const val ACTION_UPDATE_BOARDED    = "UPDATE_BOARDED"
 
         // Extras
-        const val EXTRA_PERJALANAN_ID = "perjalanan_id"
+        const val EXTRA_PERJALANAN_ID    = "perjalanan_id"
+        const val EXTRA_FIREBASE_BUS_ID  = "firebase_bus_id" // ✅ TAMBAH
 
         // ============================================
         // STATIC INTENT FACTORIES
         // ============================================
 
+        /**
+         * ✅ FIX: Tambah parameter firebaseBusId.
+         * Nilai ini dari response.data.firebaseBusId saat mulai perjalanan,
+         * dan harus sama persis dengan armada.firebase_bus_id di server.
+         */
         fun createStartIntent(
             context: Context,
             perjalanId: Int,
+            firebaseBusId: String,  // ✅ TAMBAH
             namaBus: String?,
             armadaNomor: String?,
             kelas: String?,
@@ -69,7 +76,8 @@ class GpsTrackingService : Service() {
             tarif: Double
         ): Intent = Intent(context, GpsTrackingService::class.java).apply {
             action = ACTION_START_TRACKING
-            putExtra(EXTRA_PERJALANAN_ID, perjalanId)
+            putExtra(EXTRA_PERJALANAN_ID,   perjalanId)
+            putExtra(EXTRA_FIREBASE_BUS_ID, firebaseBusId) // ✅ TAMBAH
             putExtra("nama_bus",     namaBus)
             putExtra("armada_nomor", armadaNomor)
             putExtra("kelas",        kelas)
@@ -114,25 +122,25 @@ class GpsTrackingService : Service() {
     // FIELDS
     // ============================================
 
-    private var perjalanId:  Int    = 0
-    private var namaBus:     String? = null
-    private var armadaNomor: String? = null
-    private var kelas:       String? = null
-    private var kapasitas:   Int    = 40
-    private var ruteNama:    String? = null
-    private var polyline:    String? = null
-    private var kruNama:     String? = null
-    private var tarif:       Double = 0.0
-    private var destLat:     Double = 0.0
-    private var destLng:     Double = 0.0
+    private var perjalanId:    Int     = 0
+    private var firebaseBusId: String  = ""  // ✅ TAMBAH
+    private var namaBus:       String? = null
+    private var armadaNomor:   String? = null
+    private var kelas:         String? = null
+    private var kapasitas:     Int     = 40
+    private var ruteNama:      String? = null
+    private var polyline:      String? = null
+    private var kruNama:       String? = null
+    private var tarif:         Double  = 0.0
+    private var destLat:       Double  = 0.0
+    private var destLng:       Double  = 0.0
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
-    private lateinit var locationCallback: LocationCallback
-    private lateinit var firebaseManager: FirebaseManager
-    private lateinit var etaCalculator: ETACalculator
-    private lateinit var prefManager: SharedPrefManager
+    private lateinit var locationCallback:    LocationCallback
+    private lateinit var firebaseManager:     FirebaseManager
+    private lateinit var etaCalculator:       ETACalculator
+    private lateinit var prefManager:         SharedPrefManager
 
-    // Coroutine scope — dibatalkan saat service destroy
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var totalJarak:    Double  = 0.0
@@ -171,7 +179,8 @@ class GpsTrackingService : Service() {
         super.onDestroy()
         stopLocationUpdates()
         serviceScope.cancel()
-        if (perjalanId > 0) firebaseManager.clearBusData(perjalanId)
+        // ✅ FIX: pakai firebaseBusId bukan perjalanId
+        if (firebaseBusId.isNotEmpty()) firebaseManager.clearBusData(firebaseBusId)
         prefManager.setTracking(false)
         isTracking = false
         Log.d(TAG, "Service Destroyed")
@@ -184,7 +193,12 @@ class GpsTrackingService : Service() {
     // ============================================
 
     private fun handleStartTracking(intent: Intent) {
-        perjalanId  = intent.getIntExtra(EXTRA_PERJALANAN_ID, 0)
+        perjalanId    = intent.getIntExtra(EXTRA_PERJALANAN_ID, 0)
+        // ✅ FIX: ambil firebaseBusId dari intent; fallback ke SharedPref jika tidak ada
+        firebaseBusId = intent.getStringExtra(EXTRA_FIREBASE_BUS_ID)
+            ?.takeIf { it.isNotEmpty() }
+            ?: prefManager.getFirebaseBusId()
+
         namaBus     = intent.getStringExtra("nama_bus")
         armadaNomor = intent.getStringExtra("armada_nomor")
         kelas       = intent.getStringExtra("kelas")
@@ -194,8 +208,8 @@ class GpsTrackingService : Service() {
         kruNama     = intent.getStringExtra("kru_nama")
         tarif       = intent.getDoubleExtra("tarif", 0.0)
 
-        if (perjalanId == 0 || polyline.isNullOrEmpty()) {
-            Log.e(TAG, "Invalid data! Cannot start tracking.")
+        if (perjalanId == 0 || polyline.isNullOrEmpty() || firebaseBusId.isEmpty()) {
+            Log.e(TAG, "Invalid data! perjalanId=$perjalanId firebaseBusId=$firebaseBusId polyline=${polyline?.length}")
             stopSelf(); return
         }
 
@@ -203,33 +217,43 @@ class GpsTrackingService : Service() {
             destLat = it.latitude; destLng = it.longitude
         }
 
-        totalJarak   = 0.0;  lastLocation = null
-        startTime    = System.currentTimeMillis()
-        lastETAUpdate = 0L;  updateCount  = 0
-        isTracking   = true
+        totalJarak    = 0.0; lastLocation = null
+        startTime     = System.currentTimeMillis()
+        lastETAUpdate = 0L; updateCount   = 0
+        isTracking    = true
 
         prefManager.savePerjalanId(perjalanId)
         prefManager.setTracking(true)
+        prefManager.saveFirebaseBusId(firebaseBusId) // ✅ SIMPAN ke SharedPref
 
         firebaseManager.initializeBus(
-            perjalanId, namaBus, armadaNomor, kelas,
-            ruteNama, kapasitas, kruNama, polyline, tarif
+            firebaseBusId = firebaseBusId, // ✅ FIX
+            perjalanId    = perjalanId,
+            namaBus       = namaBus,
+            plateNumber   = armadaNomor,
+            busClass      = kelas,
+            route         = ruteNama,
+            capacity      = kapasitas,
+            driver        = kruNama,
+            routePolyline = polyline,
+            tarif         = tarif
         )
 
         startForeground(NOTIFICATION_ID, createNotification("Memulai tracking...", 0f, 0.0))
         setupLocationCallback()
         startLocationUpdates()
 
-        Log.d(TAG, "Tracking started: $namaBus ($armadaNomor) tarif=$tarif")
+        Log.d(TAG, "Tracking started: $namaBus ($armadaNomor) firebaseBusId=$firebaseBusId tarif=$tarif")
     }
 
     private fun handleStopTracking() {
         stopLocationUpdates()
-        if (perjalanId > 0) {
-            firebaseManager.updateStatus(perjalanId, "completed")
-            firebaseManager.clearBusData(perjalanId)
+        if (firebaseBusId.isNotEmpty()) { // ✅ FIX
+            firebaseManager.updateStatus(firebaseBusId, "completed")
+            firebaseManager.clearBusData(firebaseBusId)
         }
         prefManager.setTracking(false)
+        prefManager.clearFirebaseBusId() // ✅ BERSIHKAN dari SharedPref
         isTracking = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -237,17 +261,19 @@ class GpsTrackingService : Service() {
 
     private fun handleUpdatePassengers(intent: Intent) {
         val current = intent.getIntExtra("current_passengers", 0)
-        firebaseManager.updatePassengers(perjalanId, current)
+        if (firebaseBusId.isNotEmpty()) firebaseManager.updatePassengers(firebaseBusId, current) // ✅ FIX
     }
 
     private fun handleUpdateBoarded(intent: Intent) {
         val totalBoarded = intent.getIntExtra("total_boarded", 0)
-        firebaseManager.updateBoardedPassengers(perjalanId, totalBoarded)
+        if (firebaseBusId.isNotEmpty()) firebaseManager.updateBoardedPassengers(firebaseBusId, totalBoarded) // ✅ FIX
     }
 
     private fun handleUpdateKondisi(intent: Intent) {
         val kondisi = intent.getStringExtra("kondisi") ?: return
-        if (kondisi.isNotEmpty()) firebaseManager.updateKondisi(perjalanId, kondisi)
+        if (kondisi.isNotEmpty() && firebaseBusId.isNotEmpty()) { // ✅ FIX
+            firebaseManager.updateKondisi(firebaseBusId, kondisi)
+        }
     }
 
     // ============================================
@@ -295,7 +321,8 @@ class GpsTrackingService : Service() {
         lastLocation = location
         updateCount++
 
-        firebaseManager.updateLocationWithTrack(perjalanId, lat, lng, speed, totalJarak)
+        // ✅ FIX: pakai firebaseBusId
+        firebaseManager.updateLocationWithTrack(firebaseBusId, lat, lng, speed, totalJarak)
 
         val now = System.currentTimeMillis()
         if (now - lastETAUpdate > ETA_UPDATE_INTERVAL && destLat != 0.0 && destLng != 0.0) {
@@ -308,7 +335,7 @@ class GpsTrackingService : Service() {
     }
 
     // ============================================
-    // ETA — pakai coroutine, bukan ExecutorService
+    // ETA
     // ============================================
 
     private fun updateETA(currentLat: Double, currentLng: Double, currentSpeed: Float) {
@@ -316,21 +343,20 @@ class GpsTrackingService : Service() {
             val result = etaCalculator.calculateETA(currentLat, currentLng, destLat, destLng)
             result.fold(
                 onSuccess = { eta ->
-                    firebaseManager.updateETA(
-                        perjalanId,
+                    firebaseManager.updateETA( // ✅ FIX
+                        firebaseBusId,
                         eta.remainingDistanceKm,
                         eta.remainingTimeMinutes,
                         eta.estimatedArrival
                     )
                 },
                 onFailure = {
-                    // Fallback ke manual
                     val eta = etaCalculator.calculateETAManual(
                         currentLat, currentLng, destLat, destLng,
                         if (currentSpeed > 0) currentSpeed else 60f
                     )
-                    firebaseManager.updateETA(
-                        perjalanId,
+                    firebaseManager.updateETA( // ✅ FIX
+                        firebaseBusId,
                         eta.remainingDistanceKm,
                         eta.remainingTimeMinutes,
                         eta.estimatedArrival

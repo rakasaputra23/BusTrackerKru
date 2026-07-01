@@ -8,12 +8,13 @@ import com.google.gson.Gson
 class SharedPrefManager private constructor(context: Context) {
 
     companion object {
-        private const val PREF_NAME         = "BusKruTrackerPrefs"
-        private const val KEY_TOKEN         = "token"
-        private const val KEY_USER          = "user"
-        private const val KEY_PERJALANAN_ID = "perjalanan_id"
-        private const val KEY_IS_TRACKING   = "is_tracking"
-        private const val KEY_IS_LOGGED_IN  = "is_logged_in"
+        private const val PREF_NAME           = "BusKruTrackerPrefs"
+        private const val KEY_TOKEN           = "token"
+        private const val KEY_USER            = "user"
+        private const val KEY_PERJALANAN_ID   = "perjalanan_id"
+        private const val KEY_IS_TRACKING     = "is_tracking"
+        private const val KEY_IS_LOGGED_IN    = "is_logged_in"
+        private const val KEY_FIREBASE_BUS_ID = "firebase_bus_id" // ✅ TAMBAH
 
         @Volatile
         private var instance: SharedPrefManager? = null
@@ -74,9 +75,9 @@ class SharedPrefManager private constructor(context: Context) {
         prefs.edit().putString(KEY_USER, gson.toJson(kru)).apply()
     }
 
-    fun getUserId(): Int      = getUser()?.id ?: 0
-    fun getUsername(): String = getUser()?.username ?: ""
-    fun getDriverName(): String = getUser()?.driver ?: ""
+    fun getUserId(): Int         = getUser()?.id ?: 0
+    fun getUsername(): String    = getUser()?.username ?: ""
+    fun getDriverName(): String  = getUser()?.driver ?: ""
 
     // ============================================
     // PERJALANAN
@@ -90,6 +91,24 @@ class SharedPrefManager private constructor(context: Context) {
 
     fun clearPerjalanId() {
         prefs.edit().remove(KEY_PERJALANAN_ID).apply()
+    }
+
+    // ============================================
+    // FIREBASE BUS ID ✅ TAMBAH BARU
+    // ============================================
+
+    /**
+     * Simpan firebase_bus_id yang dikembalikan oleh API saat mulai perjalanan.
+     * Dibutuhkan untuk: restart service saat resume trip, dan clear data Firebase saat selesai.
+     */
+    fun saveFirebaseBusId(firebaseBusId: String) {
+        prefs.edit().putString(KEY_FIREBASE_BUS_ID, firebaseBusId).apply()
+    }
+
+    fun getFirebaseBusId(): String = prefs.getString(KEY_FIREBASE_BUS_ID, "") ?: ""
+
+    fun clearFirebaseBusId() {
+        prefs.edit().remove(KEY_FIREBASE_BUS_ID).apply()
     }
 
     // ============================================
