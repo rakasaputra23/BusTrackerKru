@@ -6,7 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
-import android.os.Build
+import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.buskrutracker.api.RetrofitClient
@@ -72,11 +73,16 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
     private val _stats = MutableStateFlow(TrackingStats())
     val stats: StateFlow<TrackingStats> = _stats
 
-    // Akumulasi boarding — persist ke SharedPreferences
+    // status GPS & jaringan device (murni UI, tidak dikirim ke Firebase/API)
+    private val _gpsEnabled = MutableStateFlow(true)
+    val gpsEnabled: StateFlow<Boolean> = _gpsEnabled
+
+    private val _networkAvailable = MutableStateFlow(true)
+    val networkAvailable: StateFlow<Boolean> = _networkAvailable
+
     private var totalPassengersBoarded = 0
     private var perjalanId = 0
 
-    // BroadcastReceiver untuk update GPS dari service
     private val locationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val speed       = intent.getFloatExtra("speed", 0f)
@@ -90,13 +96,26 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private val gpsStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            _gpsEnabled.value = intent.getBooleanExtra(
+                GpsTrackingService.EXTRA_GPS_ENABLED, true
+            )
+        }
+    }
+
+    private val networkStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            _networkAvailable.value = intent.getBooleanExtra(
+                GpsTrackingService.EXTRA_NETWORK_AVAILABLE, true
+            )
+        }
+    }
+
     // ============================================
     // INIT
     // ============================================
 
-    // ✅ FIX: tambah parameter kapasitasAwal (default 40 agar tetap backward-compatible),
-    // supaya kapasitas dari navigasi langsung terpasang sejak frame pertama,
-    // tidak menunggu loadPerjalananAktif() selesai/berhasil.
     fun init(perjalanId: Int, kapasitasAwal: Int = 40) {
         this.perjalanId = perjalanId
         _kapasitas.value = kapasitasAwal
@@ -105,30 +124,36 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
         loadPerjalananAktif()
     }
 
-    // ✅ FIX: di Android 13+ (API 33 / TIRAMISU), registerReceiver() untuk broadcast
-    // internal wajib menyertakan flag RECEIVER_EXPORTED / RECEIVER_NOT_EXPORTED.
-    // Karena broadcast "GPS_LOCATION_UPDATE" ini hanya dikirim dari dalam app sendiri
-    // (GpsTrackingService), dipakai RECEIVER_NOT_EXPORTED (lebih aman, tidak bisa
-    // diakses app lain).
+    // ✅ DIPERBAIKI — pakai ContextCompat.registerReceiver, otomatis handle
+    // perbedaan API level (Tiramisu+) tanpa if/else manual, dan lint tidak
+    // lagi menandai "missing RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED flag".
     private fun registerReceiver() {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(
-                    locationReceiver,
-                    IntentFilter("GPS_LOCATION_UPDATE"),
-                    Context.RECEIVER_NOT_EXPORTED
-                )
-            } else {
-                context.registerReceiver(
-                    locationReceiver,
-                    IntentFilter("GPS_LOCATION_UPDATE")
-                )
-            }
+            ContextCompat.registerReceiver(
+                context,
+                locationReceiver,
+                IntentFilter("GPS_LOCATION_UPDATE"),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            ContextCompat.registerReceiver(
+                context,
+                gpsStatusReceiver,
+                IntentFilter(GpsTrackingService.ACTION_GPS_STATUS_UPDATE),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            ContextCompat.registerReceiver(
+                context,
+                networkStatusReceiver,
+                IntentFilter(GpsTrackingService.ACTION_NETWORK_STATUS_UPDATE),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
         } catch (_: Exception) {}
     }
 
     fun unregisterReceiver() {
         try { context.unregisterReceiver(locationReceiver) } catch (_: Exception) {}
+        try { context.unregisterReceiver(gpsStatusReceiver) } catch (_: Exception) {}
+        try { context.unregisterReceiver(networkStatusReceiver) } catch (_: Exception) {}
     }
 
     override fun onCleared() {
@@ -140,8 +165,9 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
     // PERSIST BOARDED COUNT
     // ============================================
 
+    // ✅ DIPERBAIKI — pakai KTX extension `edit {}` (auto commit/apply, lebih ringkas)
     private fun saveBoardedCount() {
-        trackingPrefs.edit().putInt("boarded_$perjalanId", totalPassengersBoarded).apply()
+        trackingPrefs.edit { putInt("boarded_$perjalanId", totalPassengersBoarded) }
     }
 
     private fun restoreBoardedCount() {
@@ -149,7 +175,7 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun clearBoardedCount() {
-        trackingPrefs.edit().remove("boarded_$perjalanId").apply()
+        trackingPrefs.edit { remove("boarded_$perjalanId") }
     }
 
     // ============================================
@@ -197,14 +223,12 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
 
     private fun syncPenumpang() {
         val current = _jumlahPenumpang.value
-        // Update ke service (Firebase)
         context.startService(
             GpsTrackingService.createPassengerUpdateIntent(context, perjalanId, current)
         )
         context.startService(
             GpsTrackingService.createBoardingUpdateIntent(context, perjalanId, totalPassengersBoarded)
         )
-        // Update ke server (REST API)
         val token = prefManager.getToken() ?: return
         viewModelScope.launch {
             try {

@@ -31,7 +31,7 @@ fun TrackingScreen(
     namaBus:       String,
     armadaNomor:   String,
     ruteNama:      String,
-    kapasitasAwal: Int = 40,   // ✅ FIX: kapasitas dari navigasi, bukan cuma default hardcode
+    kapasitasAwal: Int = 40,
     vm: TrackingViewModel = viewModel()
 ) {
     val uiState         by vm.uiState.collectAsState()
@@ -39,24 +39,22 @@ fun TrackingScreen(
     val kapasitas       by vm.kapasitas.collectAsState()
     val kondisi         by vm.kondisi.collectAsState()
     val stats           by vm.stats.collectAsState()
+    val gpsEnabled      by vm.gpsEnabled.collectAsState()
+    val networkAvailable by vm.networkAvailable.collectAsState()
 
     var toastMessage    by remember { mutableStateOf<String?>(null) }
     var showAkhiriDialog by remember { mutableStateOf(false) }
     var showBackDialog  by remember { mutableStateOf(false) }
 
-    // Parse origin/destination dari ruteNama
     val sep    = if (ruteNama.contains("→")) "→" else "-"
     val parts  = ruteNama.split(sep)
     val origin = parts.getOrNull(0)?.trim()?.uppercase() ?: "ASAL"
     val dest   = parts.getOrNull(1)?.trim()?.uppercase() ?: "TUJUAN"
 
-    // ✅ FIX: kapasitasAwal diteruskan ke ViewModel.init() supaya nilai sudah benar
-    // sejak frame pertama, tidak menunggu loadPerjalananAktif() selesai/berhasil
     LaunchedEffect(perjalanId) { vm.init(perjalanId, kapasitasAwal) }
 
     DisposableEffect(Unit) { onDispose { vm.unregisterReceiver() } }
 
-    // Handle state
     LaunchedEffect(uiState) {
         when (val state = uiState) {
             is TrackingUiState.SelesaiSuccess -> {
@@ -81,9 +79,12 @@ fun TrackingScreen(
         if (toastMessage != null) { delay(2000); toastMessage = null }
     }
 
+    LaunchedEffect(gpsEnabled) {
+        if (!gpsEnabled) toastMessage = "⚠️ GPS mati! Nyalakan kembali agar tracking akurat"
+    }
+
     BackHandler { showBackDialog = true }
 
-    // ── Back Warning Dialog ──
     if (showBackDialog) {
         AlertDialog(
             onDismissRequest = { showBackDialog = false },
@@ -97,7 +98,6 @@ fun TrackingScreen(
         )
     }
 
-    // ── Akhiri Dialog ──
     if (showAkhiriDialog) {
         val busInfo = if (namaBus.isNotEmpty()) "$namaBus ($armadaNomor)" else armadaNomor
         AlertDialog(
@@ -124,7 +124,6 @@ fun TrackingScreen(
         )
     }
 
-    // ── Main UI ──
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -153,20 +152,33 @@ fun TrackingScreen(
                     Text(dest, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             }
-            // GPS Badge
-            Card(
+
+            // ── Status Badges (Network + GPS) — dirapikan agar seragam ──
+            Row(
                 modifier = Modifier.align(Alignment.CenterEnd),
-                shape    = RoundedCornerShape(20.dp),
-                colors   = CardDefaults.cardColors(containerColor = Green800)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(Modifier.size(6.dp).background(Green500, RoundedCornerShape(3.dp)))
-                    Spacer(Modifier.width(6.dp))
-                    Text("GPS ON", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Green500)
-                }
+                StatusBadge(
+                    label      = if (networkAvailable) "ONLINE" else "OFFLINE",
+                    isActive   = networkAvailable,
+                    activeBg   = Gray700,
+                    activeDot  = Gray400,
+                    activeText = Gray300,
+                    inactiveBg = Red900,
+                    inactiveDot = Red500,
+                    inactiveText = Red500
+                )
+                StatusBadge(
+                    label      = if (gpsEnabled) "GPS ON" else "GPS OFF",
+                    isActive   = gpsEnabled,
+                    activeBg   = Green800,
+                    activeDot  = Green500,
+                    activeText = Green500,
+                    inactiveBg = Red900,
+                    inactiveDot = Red500,
+                    inactiveText = Red500
+                )
             }
         }
 
@@ -179,7 +191,6 @@ fun TrackingScreen(
             verticalArrangement = Arrangement.Center
         ) {
 
-            // Label
             Text(
                 "TOTAL PENUMPANG",
                 fontSize   = 9.sp,
@@ -189,7 +200,6 @@ fun TrackingScreen(
             )
             Spacer(Modifier.height(24.dp))
 
-            // ── Big Counter ──
             Row(verticalAlignment = Alignment.Top) {
                 Text(
                     "$jumlahPenumpang",
@@ -209,12 +219,10 @@ fun TrackingScreen(
 
             Spacer(Modifier.height(32.dp))
 
-            // ── Penumpang Buttons ──
             Row(
                 modifier = Modifier.fillMaxWidth().height(80.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Kurang (Turun)
                 Card(
                     modifier  = Modifier.weight(1f).fillMaxHeight(),
                     shape     = RoundedCornerShape(16.dp),
@@ -231,7 +239,6 @@ fun TrackingScreen(
                             color = Red500, letterSpacing = 1.sp)
                     }
                 }
-                // Tambah (Naik)
                 Card(
                     modifier  = Modifier.weight(1f).fillMaxHeight(),
                     shape     = RoundedCornerShape(16.dp),
@@ -253,7 +260,6 @@ fun TrackingScreen(
 
             Spacer(Modifier.height(32.dp))
 
-            // ── Status Kondisi ──
             Text(
                 "LAPOR KONDISI BUS:",
                 fontSize   = 9.sp,
@@ -301,14 +307,13 @@ fun TrackingScreen(
 
             Spacer(Modifier.height(24.dp))
 
-            // ── Stats Row ──
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                StatItem("Kecepatan", "${"%.1f".format(stats.speedKmh)} km/h")
-                StatItem("Jarak",     "${"%.2f".format(stats.jarakKm)} km")
-                StatItem("Durasi",    "${stats.durasiMenit / 60}j ${stats.durasiMenit % 60}m")
+                StatItem("Kecepatan",    "${"%.1f".format(stats.speedKmh)} km/h")
+                StatItem("Jarak Tempuh", "${"%.2f".format(stats.jarakKm)} km")
+                StatItem("Durasi",       "${stats.durasiMenit / 60}j ${stats.durasiMenit % 60}m")
             }
         }
 
@@ -374,6 +379,53 @@ fun TrackingScreen(
     }
 }
 
+/**
+ * ✅ BARU — komponen badge status yang seragam (dipakai untuk Network & GPS)
+ * Ukuran, padding, dot, dan tipografi disamakan agar keduanya sejajar rapi.
+ */
+@Composable
+private fun StatusBadge(
+    label: String,
+    isActive: Boolean,
+    activeBg: Color,
+    activeDot: Color,
+    activeText: Color,
+    inactiveBg: Color,
+    inactiveDot: Color,
+    inactiveText: Color
+) {
+    val bgColor by animateColorAsState(
+        targetValue = if (isActive) activeBg else inactiveBg,
+        animationSpec = tween(200), label = "badgeBg"
+    )
+
+    Card(
+        shape  = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = bgColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .height(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .background(if (isActive) activeDot else inactiveDot, RoundedCornerShape(3.dp))
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                label,
+                fontSize   = 9.sp,
+                fontWeight = FontWeight.Bold,
+                color      = if (isActive) activeText else inactiveText,
+                letterSpacing = 0.3.sp
+            )
+        }
+    }
+}
+
 @Composable
 private fun StatusButton(
     label: String, emoji: String,
@@ -397,7 +449,7 @@ private fun StatusButton(
         onClick   = onClick
     ) {
         Column(
-            modifier = Modifier.fillMaxSize().then(if (!isActive) Modifier else Modifier),
+            modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {

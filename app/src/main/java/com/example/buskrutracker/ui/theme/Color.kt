@@ -32,3 +32,8 @@ val Gray200   = Color(0xFFE5E7EB)
 val Gray100   = Color(0xFFF3F4F6)
 val Gray50    = Color(0xFFF9FAFB)
 val White     = Color(0xFFFFFFFF)
+// Primary
+val Blue50    = Color(0xFFEFF6FF)   // biasanya versi lebih terang dari Blue100
+
+// Success
+val Green600  = Color(0xFF059669)   // di antara Green500 dan Green800

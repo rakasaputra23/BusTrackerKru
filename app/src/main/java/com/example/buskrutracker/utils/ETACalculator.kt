@@ -14,8 +14,9 @@ class ETACalculator {
 
     companion object {
         private const val TAG = "ETACalculator"
-        private const val GOOGLE_API_KEY = "AIzaSyDDDvRiEfPqb4fUMJQ2KSxAlwm5UJa4kxs"
-        private const val DIRECTIONS_API_URL = "https://maps.googleapis.com/maps/api/directions/json"
+        private const val GOOGLE_API_KEY = "AIzaSyDtP56h8vDFWJ5jSL9c4bFoIRwG6gTp2u8"
+        // ✅ FIX: ganti dari Directions API (legacy, sudah tidak aktif) ke Routes API (baru)
+        private const val ROUTES_API_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
     }
 
     data class ETAResult(
@@ -25,7 +26,7 @@ class ETACalculator {
     )
 
     // ============================================
-    // CALCULATE ETA — suspend, tidak perlu Executor
+    // CALCULATE ETA — pakai Routes API (POST + JSON body)
     // ============================================
 
     suspend fun calculateETA(
@@ -35,25 +36,51 @@ class ETACalculator {
         destLng: Double
     ): Result<ETAResult> = withContext(Dispatchers.IO) {
         try {
-            val urlString = String.format(
-                Locale.US,
-                "%s?origin=%f,%f&destination=%f,%f&key=%s&mode=driving",
-                DIRECTIONS_API_URL, currentLat, currentLng, destLat, destLng, GOOGLE_API_KEY
-            )
+            val requestBody = JSONObject().apply {
+                put("origin", JSONObject().apply {
+                    put("location", JSONObject().apply {
+                        put("latLng", JSONObject().apply {
+                            put("latitude", currentLat)
+                            put("longitude", currentLng)
+                        })
+                    })
+                })
+                put("destination", JSONObject().apply {
+                    put("location", JSONObject().apply {
+                        put("latLng", JSONObject().apply {
+                            put("latitude", destLat)
+                            put("longitude", destLng)
+                        })
+                    })
+                })
+                put("travelMode", "DRIVE")
+                put("routingPreference", "TRAFFIC_AWARE")
+            }
 
-            val url  = URL(urlString)
+            val url  = URL(ROUTES_API_URL)
             val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod  = "GET"
+                requestMethod  = "POST"
                 connectTimeout = 10_000
                 readTimeout    = 10_000
+                doOutput       = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("X-Goog-Api-Key", GOOGLE_API_KEY)
+                // FieldMask WAJIB di Routes API, kalau tidak ada response akan kosong/ditolak
+                setRequestProperty("X-Goog-FieldMask", "routes.duration,routes.distanceMeters")
+            }
+
+            conn.outputStream.use { os ->
+                os.write(requestBody.toString().toByteArray(Charsets.UTF_8))
             }
 
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 val response = conn.inputStream.bufferedReader().readText()
                 conn.disconnect()
-                parseETAResponse(response)
+                parseRoutesResponse(response)
             } else {
+                val errorBody = conn.errorStream?.bufferedReader()?.readText() ?: ""
                 conn.disconnect()
+                Log.e(TAG, "HTTP Error ${conn.responseCode}: $errorBody")
                 Result.failure(Exception("HTTP Error: ${conn.responseCode}"))
             }
         } catch (e: Exception) {
@@ -62,29 +89,35 @@ class ETACalculator {
         }
     }
 
-    private fun parseETAResponse(jsonResponse: String): Result<ETAResult> {
+    private fun parseRoutesResponse(jsonResponse: String): Result<ETAResult> {
         return try {
             val json   = JSONObject(jsonResponse)
-            val status = json.getString("status")
+            val routes = json.optJSONArray("routes")
 
-            if (status != "OK") return Result.failure(Exception("Directions API Error: $status"))
+            if (routes == null || routes.length() == 0) {
+                return Result.failure(Exception("Routes API: tidak ada rute ditemukan"))
+            }
 
-            val leg            = json.getJSONArray("routes").getJSONObject(0)
-                .getJSONArray("legs").getJSONObject(0)
-            val distanceKm     = leg.getJSONObject("distance").getDouble("value") / 1000.0
-            val durationSec    = leg.getJSONObject("duration").getInt("value")
-            val durationMin    = durationSec / 60
-            val arrivalMillis  = System.currentTimeMillis() + (durationSec * 1000L)
+            val route = routes.getJSONObject(0)
+            val distanceMeters = route.getInt("distanceMeters")
+            val distanceKm     = distanceMeters / 1000.0
+
+            // duration dari Routes API formatnya string, misal "125s"
+            val durationStr = route.getString("duration")
+            val durationSec = durationStr.removeSuffix("s").toIntOrNull() ?: 0
+            val durationMin = durationSec / 60
+
+            val arrivalMillis = System.currentTimeMillis() + (durationSec * 1000L)
 
             Result.success(ETAResult(distanceKm, durationMin, formatTimestamp(arrivalMillis)))
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing ETA: ${e.message}")
+            Log.e(TAG, "Error parsing Routes API response: ${e.message}")
             Result.failure(e)
         }
     }
 
     // ============================================
-    // FALLBACK — Haversine manual
+    // FALLBACK — Haversine manual (tidak berubah)
     // ============================================
 
     fun calculateETAManual(

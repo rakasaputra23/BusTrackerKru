@@ -107,7 +107,7 @@ fun LoginScreen(
             Spacer(Modifier.height(16.dp))
 
             Text(
-                "Bus Tracker",
+                "STJ Kru Tracker",
                 fontSize   = 28.sp,
                 fontWeight = FontWeight.Bold,
                 color      = Gray900

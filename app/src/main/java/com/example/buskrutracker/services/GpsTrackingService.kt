@@ -8,7 +8,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.location.Location
+import android.location.LocationManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
@@ -24,7 +30,6 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
-import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,10 +42,20 @@ class GpsTrackingService : Service() {
         private const val TAG              = "GpsTrackingService"
         private const val CHANNEL_ID       = "gps_tracking_channel"
         private const val NOTIFICATION_ID  = 1001
+
+        // ✅ UBAH — update murni berbasis waktu, tiap 5 detik, TIDAK peduli jarak/tempat.
         private const val UPDATE_INTERVAL  = 5_000L
-        private const val FASTEST_INTERVAL = 3_000L
-        private const val MIN_DISTANCE     = 5.0f
+        private const val FASTEST_INTERVAL = 5_000L
+        // ✅ UBAH — jarak minimum di-nolkan, supaya update tetap masuk walau device diam
+        // (macet, lampu merah, nunggu penumpang). Jarak minimum HANYA dipakai nanti untuk
+        // filter akumulasi total jarak tempuh (lihat handleLocationUpdate), bukan untuk trigger update.
+        private const val MIN_UPDATE_DISTANCE = 0f
+        // Dipakai hanya untuk mengabaikan noise GPS saat menghitung akumulasi jarak total,
+        // BUKAN untuk menahan update speed/durasi.
+        private const val MIN_DISTANCE_FOR_ACCUMULATION = 5.0f
+
         private const val ETA_UPDATE_INTERVAL = 30_000L
+        private const val GPS_STATUS_CHECK_INTERVAL = 3_000L
 
         // Actions
         const val ACTION_START_TRACKING    = "START_TRACKING"
@@ -51,21 +66,18 @@ class GpsTrackingService : Service() {
 
         // Extras
         const val EXTRA_PERJALANAN_ID    = "perjalanan_id"
-        const val EXTRA_FIREBASE_BUS_ID  = "firebase_bus_id" // ✅ TAMBAH
+        const val EXTRA_FIREBASE_BUS_ID  = "firebase_bus_id"
 
-        // ============================================
-        // STATIC INTENT FACTORIES
-        // ============================================
+        // broadcast actions untuk status device (LOCAL saja, tidak menyentuh Firebase)
+        const val ACTION_GPS_STATUS_UPDATE     = "GPS_STATUS_UPDATE"
+        const val ACTION_NETWORK_STATUS_UPDATE = "NETWORK_STATUS_UPDATE"
+        const val EXTRA_GPS_ENABLED            = "gps_enabled"
+        const val EXTRA_NETWORK_AVAILABLE      = "network_available"
 
-        /**
-         * ✅ FIX: Tambah parameter firebaseBusId.
-         * Nilai ini dari response.data.firebaseBusId saat mulai perjalanan,
-         * dan harus sama persis dengan armada.firebase_bus_id di server.
-         */
         fun createStartIntent(
             context: Context,
             perjalanId: Int,
-            firebaseBusId: String,  // ✅ TAMBAH
+            firebaseBusId: String,
             namaBus: String?,
             armadaNomor: String?,
             kelas: String?,
@@ -77,7 +89,7 @@ class GpsTrackingService : Service() {
         ): Intent = Intent(context, GpsTrackingService::class.java).apply {
             action = ACTION_START_TRACKING
             putExtra(EXTRA_PERJALANAN_ID,   perjalanId)
-            putExtra(EXTRA_FIREBASE_BUS_ID, firebaseBusId) // ✅ TAMBAH
+            putExtra(EXTRA_FIREBASE_BUS_ID, firebaseBusId)
             putExtra("nama_bus",     namaBus)
             putExtra("armada_nomor", armadaNomor)
             putExtra("kelas",        kelas)
@@ -123,7 +135,7 @@ class GpsTrackingService : Service() {
     // ============================================
 
     private var perjalanId:    Int     = 0
-    private var firebaseBusId: String  = ""  // ✅ TAMBAH
+    private var firebaseBusId: String  = ""
     private var namaBus:       String? = null
     private var armadaNomor:   String? = null
     private var kelas:         String? = null
@@ -150,6 +162,16 @@ class GpsTrackingService : Service() {
     private var updateCount:   Int     = 0
     private var isTracking:    Boolean = false
 
+    // monitor status GPS device (bukan data lokasi, cuma status on/off)
+    private val gpsStatusHandler = Handler(Looper.getMainLooper())
+    private var gpsStatusRunnable: Runnable? = null
+    private var lastGpsStatus: Boolean? = null
+
+    // monitor status jaringan internet
+    private lateinit var connectivityManager: ConnectivityManager
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastNetworkStatus: Boolean? = null
+
     // ============================================
     // LIFECYCLE
     // ============================================
@@ -160,6 +182,7 @@ class GpsTrackingService : Service() {
         firebaseManager     = FirebaseManager()
         etaCalculator       = ETACalculator()
         prefManager         = SharedPrefManager.getInstance(this)
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         createNotificationChannel()
         Log.d(TAG, "Service Created")
     }
@@ -178,8 +201,9 @@ class GpsTrackingService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopLocationUpdates()
+        stopGpsStatusMonitor()
+        stopNetworkMonitor()
         serviceScope.cancel()
-        // ✅ FIX: pakai firebaseBusId bukan perjalanId
         if (firebaseBusId.isNotEmpty()) firebaseManager.clearBusData(firebaseBusId)
         prefManager.setTracking(false)
         isTracking = false
@@ -194,7 +218,6 @@ class GpsTrackingService : Service() {
 
     private fun handleStartTracking(intent: Intent) {
         perjalanId    = intent.getIntExtra(EXTRA_PERJALANAN_ID, 0)
-        // ✅ FIX: ambil firebaseBusId dari intent; fallback ke SharedPref jika tidak ada
         firebaseBusId = intent.getStringExtra(EXTRA_FIREBASE_BUS_ID)
             ?.takeIf { it.isNotEmpty() }
             ?: prefManager.getFirebaseBusId()
@@ -213,9 +236,23 @@ class GpsTrackingService : Service() {
             stopSelf(); return
         }
 
+        val hasLocationPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+            this, android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        if (!hasLocationPermission) {
+            Log.e(TAG, "Izin lokasi belum granted, service dihentikan sebelum startForeground()")
+            stopSelf()
+            return
+        }
+
+        Log.d(TAG, "=== CEK POLYLINE === panjang=${polyline?.length} isi=$polyline")
+
         PolylineUtils.getDestination(polyline!!)?.let {
             destLat = it.latitude; destLng = it.longitude
         }
+
+        Log.d(TAG, "=== HASIL DECODE === destLat=$destLat destLng=$destLng")
 
         totalJarak    = 0.0; lastLocation = null
         startTime     = System.currentTimeMillis()
@@ -224,10 +261,10 @@ class GpsTrackingService : Service() {
 
         prefManager.savePerjalanId(perjalanId)
         prefManager.setTracking(true)
-        prefManager.saveFirebaseBusId(firebaseBusId) // ✅ SIMPAN ke SharedPref
+        prefManager.saveFirebaseBusId(firebaseBusId)
 
         firebaseManager.initializeBus(
-            firebaseBusId = firebaseBusId, // ✅ FIX
+            firebaseBusId = firebaseBusId,
             perjalanId    = perjalanId,
             namaBus       = namaBus,
             plateNumber   = armadaNomor,
@@ -242,18 +279,22 @@ class GpsTrackingService : Service() {
         startForeground(NOTIFICATION_ID, createNotification("Memulai tracking...", 0f, 0.0))
         setupLocationCallback()
         startLocationUpdates()
+        startGpsStatusMonitor()
+        startNetworkMonitor()
 
         Log.d(TAG, "Tracking started: $namaBus ($armadaNomor) firebaseBusId=$firebaseBusId tarif=$tarif")
     }
 
     private fun handleStopTracking() {
         stopLocationUpdates()
-        if (firebaseBusId.isNotEmpty()) { // ✅ FIX
+        stopGpsStatusMonitor()
+        stopNetworkMonitor()
+        if (firebaseBusId.isNotEmpty()) {
             firebaseManager.updateStatus(firebaseBusId, "completed")
             firebaseManager.clearBusData(firebaseBusId)
         }
         prefManager.setTracking(false)
-        prefManager.clearFirebaseBusId() // ✅ BERSIHKAN dari SharedPref
+        prefManager.clearFirebaseBusId()
         isTracking = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -261,17 +302,17 @@ class GpsTrackingService : Service() {
 
     private fun handleUpdatePassengers(intent: Intent) {
         val current = intent.getIntExtra("current_passengers", 0)
-        if (firebaseBusId.isNotEmpty()) firebaseManager.updatePassengers(firebaseBusId, current) // ✅ FIX
+        if (firebaseBusId.isNotEmpty()) firebaseManager.updatePassengers(firebaseBusId, current)
     }
 
     private fun handleUpdateBoarded(intent: Intent) {
         val totalBoarded = intent.getIntExtra("total_boarded", 0)
-        if (firebaseBusId.isNotEmpty()) firebaseManager.updateBoardedPassengers(firebaseBusId, totalBoarded) // ✅ FIX
+        if (firebaseBusId.isNotEmpty()) firebaseManager.updateBoardedPassengers(firebaseBusId, totalBoarded)
     }
 
     private fun handleUpdateKondisi(intent: Intent) {
         val kondisi = intent.getStringExtra("kondisi") ?: return
-        if (kondisi.isNotEmpty() && firebaseBusId.isNotEmpty()) { // ✅ FIX
+        if (kondisi.isNotEmpty() && firebaseBusId.isNotEmpty()) {
             firebaseManager.updateKondisi(firebaseBusId, kondisi)
         }
     }
@@ -289,10 +330,12 @@ class GpsTrackingService : Service() {
         }
     }
 
+    // ✅ UBAH — setMinUpdateDistanceMeters(0f): update WAJIB masuk tiap 5 detik
+    // walau device diam di tempat yang sama (macet, lampu merah, dsb).
     private fun startLocationUpdates() {
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, UPDATE_INTERVAL)
             .setMinUpdateIntervalMillis(FASTEST_INTERVAL)
-            .setMinUpdateDistanceMeters(MIN_DISTANCE)
+            .setMinUpdateDistanceMeters(MIN_UPDATE_DISTANCE)
             .build()
         try {
             fusedLocationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
@@ -308,26 +351,38 @@ class GpsTrackingService : Service() {
 
     private fun handleLocationUpdate(location: Location) {
         if (!isTracking) return
-        if (location.accuracy > 50) return
+
+        Log.d(TAG, "=== LOCATION MASUK === accuracy=${location.accuracy}m lat=${location.latitude} lng=${location.longitude}")
+
+        if (location.accuracy > 50) {
+            Log.d(TAG, "=== LOCATION DIBUANG karena accuracy > 50 ===")
+            return
+        }
 
         val lat   = location.latitude
         val lng   = location.longitude
         val speed = location.speed * 3.6f
 
+        // Akumulasi jarak tetap pakai filter noise (MIN_DISTANCE_FOR_ACCUMULATION),
+        // tapi ini TIDAK menahan pengiriman update speed/durasi tiap 5 detik.
         lastLocation?.let { last ->
             val dist = last.distanceTo(location)
-            if (dist > MIN_DISTANCE) totalJarak += dist / 1000.0
+            if (dist > MIN_DISTANCE_FOR_ACCUMULATION) totalJarak += dist / 1000.0
         }
         lastLocation = location
         updateCount++
 
-        // ✅ FIX: pakai firebaseBusId
         firebaseManager.updateLocationWithTrack(firebaseBusId, lat, lng, speed, totalJarak)
 
         val now = System.currentTimeMillis()
+        Log.d(TAG, "=== CEK KONDISI ETA === destLat=$destLat destLng=$destLng selisihWaktu=${now - lastETAUpdate}")
+
         if (now - lastETAUpdate > ETA_UPDATE_INTERVAL && destLat != 0.0 && destLng != 0.0) {
+            Log.d(TAG, "=== MEMANGGIL updateETA() ===")
             updateETA(lat, lng, speed)
             lastETAUpdate = now
+        } else {
+            Log.d(TAG, "=== updateETA() DILEWATI karena kondisi belum terpenuhi ===")
         }
 
         updateNotification("%.1f km/h | %.2f km".format(speed, totalJarak), speed, totalJarak)
@@ -343,19 +398,22 @@ class GpsTrackingService : Service() {
             val result = etaCalculator.calculateETA(currentLat, currentLng, destLat, destLng)
             result.fold(
                 onSuccess = { eta ->
-                    firebaseManager.updateETA( // ✅ FIX
+                    Log.d(TAG, "=== DIRECTIONS API SUKSES === jarak=${eta.remainingDistanceKm}km waktu=${eta.remainingTimeMinutes}menit")
+                    firebaseManager.updateETA(
                         firebaseBusId,
                         eta.remainingDistanceKm,
                         eta.remainingTimeMinutes,
                         eta.estimatedArrival
                     )
                 },
-                onFailure = {
+                onFailure = { error ->
+                    Log.e(TAG, "=== DIRECTIONS API GAGAL: ${error.message} — pakai fallback Haversine ===")
                     val eta = etaCalculator.calculateETAManual(
                         currentLat, currentLng, destLat, destLng,
                         if (currentSpeed > 0) currentSpeed else 60f
                     )
-                    firebaseManager.updateETA( // ✅ FIX
+                    Log.d(TAG, "=== FALLBACK HASIL === jarak=${eta.remainingDistanceKm}km waktu=${eta.remainingTimeMinutes}menit")
+                    firebaseManager.updateETA(
                         firebaseBusId,
                         eta.remainingDistanceKm,
                         eta.remainingTimeMinutes,
@@ -367,11 +425,86 @@ class GpsTrackingService : Service() {
     }
 
     // ============================================
-    // BROADCAST
+    // GPS DEVICE STATUS MONITOR (lokal, tidak masuk Firebase)
+    // ============================================
+
+    private fun startGpsStatusMonitor() {
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        gpsStatusRunnable = object : Runnable {
+            override fun run() {
+                val gpsOn = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                if (gpsOn != lastGpsStatus) {
+                    lastGpsStatus = gpsOn
+                    sendBroadcast(Intent(ACTION_GPS_STATUS_UPDATE).apply {
+                        setPackage(packageName)
+                        putExtra(EXTRA_GPS_ENABLED, gpsOn)
+                    })
+                    Log.d(TAG, "GPS status changed: $gpsOn")
+                }
+                gpsStatusHandler.postDelayed(this, GPS_STATUS_CHECK_INTERVAL)
+            }
+        }
+        gpsStatusHandler.post(gpsStatusRunnable!!)
+    }
+
+    private fun stopGpsStatusMonitor() {
+        gpsStatusRunnable?.let { gpsStatusHandler.removeCallbacks(it) }
+        gpsStatusRunnable = null
+        lastGpsStatus = null
+    }
+
+    // ============================================
+    // NETWORK STATUS MONITOR (lokal, tidak masuk Firebase)
+    // ============================================
+
+    private fun startNetworkMonitor() {
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+
+        networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                broadcastNetworkStatus(true)
+            }
+            override fun onLost(network: Network) {
+                broadcastNetworkStatus(false)
+            }
+            override fun onUnavailable() {
+                broadcastNetworkStatus(false)
+            }
+        }
+        try {
+            connectivityManager.registerNetworkCallback(request, networkCallback!!)
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal register network callback: ${e.message}")
+        }
+    }
+
+    private fun broadcastNetworkStatus(available: Boolean) {
+        if (available == lastNetworkStatus) return
+        lastNetworkStatus = available
+        sendBroadcast(Intent(ACTION_NETWORK_STATUS_UPDATE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_NETWORK_AVAILABLE, available)
+        })
+        Log.d(TAG, "Network status changed: $available")
+    }
+
+    private fun stopNetworkMonitor() {
+        networkCallback?.let {
+            try { connectivityManager.unregisterNetworkCallback(it) } catch (_: Exception) {}
+        }
+        networkCallback = null
+        lastNetworkStatus = null
+    }
+
+    // ============================================
+    // BROADCAST LOKASI
     // ============================================
 
     private fun broadcastLocationUpdate(lat: Double, lng: Double, speed: Float, jarak: Double) {
         sendBroadcast(Intent("GPS_LOCATION_UPDATE").apply {
+            setPackage(packageName)
             putExtra("latitude",     lat)
             putExtra("longitude",    lng)
             putExtra("speed",        speed)
