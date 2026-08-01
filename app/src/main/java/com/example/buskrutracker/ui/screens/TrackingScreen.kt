@@ -5,8 +5,15 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
+import com.example.buskrutracker.models.Kru
 import com.example.buskrutracker.ui.navigation.Routes
 import com.example.buskrutracker.ui.theme.*
 import com.example.buskrutracker.viewmodel.TrackingUiState
@@ -34,17 +42,24 @@ fun TrackingScreen(
     kapasitasAwal: Int = 40,
     vm: TrackingViewModel = viewModel()
 ) {
-    val uiState         by vm.uiState.collectAsState()
-    val jumlahPenumpang by vm.jumlahPenumpang.collectAsState()
-    val kapasitas       by vm.kapasitas.collectAsState()
-    val kondisi         by vm.kondisi.collectAsState()
-    val stats           by vm.stats.collectAsState()
-    val gpsEnabled      by vm.gpsEnabled.collectAsState()
+    val uiState          by vm.uiState.collectAsState()
+    val jumlahPenumpang  by vm.jumlahPenumpang.collectAsState()
+    val kapasitas        by vm.kapasitas.collectAsState()
+    val kondisi          by vm.kondisi.collectAsState()
+    val stats            by vm.stats.collectAsState()
+    val gpsEnabled       by vm.gpsEnabled.collectAsState()
     val networkAvailable by vm.networkAvailable.collectAsState()
 
-    var toastMessage    by remember { mutableStateOf<String?>(null) }
+    // ✅ BARU — state untuk fitur ganti driver
+    val currentDriver       by vm.currentDriver.collectAsState()
+    val daftarKru           by vm.daftarKru.collectAsState()
+    val isLoadingKru        by vm.isLoadingKru.collectAsState()
+    val isGantiDriverLoading by vm.isGantiDriverLoading.collectAsState()
+
+    var toastMessage     by remember { mutableStateOf<String?>(null) }
     var showAkhiriDialog by remember { mutableStateOf(false) }
-    var showBackDialog  by remember { mutableStateOf(false) }
+    var showBackDialog   by remember { mutableStateOf(false) }
+    var showGantiDriverDialog by remember { mutableStateOf(false) } // ✅ BARU
 
     val sep    = if (ruteNama.contains("→")) "→" else "-"
     val parts  = ruteNama.split(sep)
@@ -124,6 +139,18 @@ fun TrackingScreen(
         )
     }
 
+    // ✅ BARU — dialog pilih driver pengganti
+    if (showGantiDriverDialog) {
+        GantiDriverDialog(
+            currentDriver     = currentDriver,
+            daftarKru         = daftarKru,
+            isLoading         = isLoadingKru,
+            isSubmitting      = isGantiDriverLoading,
+            onPilih           = { kru -> vm.gantiDriver(kru) },
+            onDismiss         = { showGantiDriverDialog = false }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -131,53 +158,101 @@ fun TrackingScreen(
     ) {
 
         // ── Top Bar ──
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Gray800)
-                .padding(20.dp)
+                .padding(horizontal = 20.dp, vertical = 16.dp)
         ) {
-            Column {
-                Text(
-                    "RUTE AKTIF",
-                    fontSize   = 9.sp,
-                    fontWeight = FontWeight.Bold,
-                    color      = Gray400,
-                    letterSpacing = 1.sp
-                )
-                Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(origin, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text(" → ", fontSize = 12.sp, color = Gray500)
-                    Text(dest, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "RUTE AKTIF",
+                        fontSize   = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color      = Gray400,
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(origin, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text(" → ", fontSize = 13.sp, color = Gray500)
+                        Text(dest, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                }
+
+                // ── Status Badges (Network + GPS) ──
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    StatusBadge(
+                        label      = if (networkAvailable) "ONLINE" else "OFFLINE",
+                        isActive   = networkAvailable,
+                        activeBg   = Gray700,
+                        activeDot  = Gray400,
+                        activeText = Gray300,
+                        inactiveBg = Red900,
+                        inactiveDot = Red500,
+                        inactiveText = Red500
+                    )
+                    StatusBadge(
+                        label      = if (gpsEnabled) "GPS ON" else "GPS OFF",
+                        isActive   = gpsEnabled,
+                        activeBg   = Green800,
+                        activeDot  = Green500,
+                        activeText = Green500,
+                        inactiveBg = Red900,
+                        inactiveDot = Red500,
+                        inactiveText = Red500
+                    )
                 }
             }
 
-            // ── Status Badges (Network + GPS) — dirapikan agar seragam ──
+            // ✅ BARU — baris info driver, rapi & jelas bisa ditekan
+            Spacer(Modifier.height(12.dp))
             Row(
-                modifier = Modifier.align(Alignment.CenterEnd),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Gray700, RoundedCornerShape(10.dp))
+                    .clickable {
+                        vm.loadDaftarKru()
+                        showGantiDriverDialog = true
+                    }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                StatusBadge(
-                    label      = if (networkAvailable) "ONLINE" else "OFFLINE",
-                    isActive   = networkAvailable,
-                    activeBg   = Gray700,
-                    activeDot  = Gray400,
-                    activeText = Gray300,
-                    inactiveBg = Red900,
-                    inactiveDot = Red500,
-                    inactiveText = Red500
+                Icon(
+                    imageVector = Icons.Filled.Person,
+                    contentDescription = null,
+                    tint = Gray400,
+                    modifier = Modifier.size(16.dp)
                 )
-                StatusBadge(
-                    label      = if (gpsEnabled) "GPS ON" else "GPS OFF",
-                    isActive   = gpsEnabled,
-                    activeBg   = Green800,
-                    activeDot  = Green500,
-                    activeText = Green500,
-                    inactiveBg = Red900,
-                    inactiveDot = Red500,
-                    inactiveText = Red500
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "DRIVER",
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Gray500,
+                        letterSpacing = 1.sp
+                    )
+                    Text(
+                        currentDriver.ifBlank { "Belum diketahui" },
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Filled.Edit,
+                    contentDescription = "Ganti Driver",
+                    tint = Blue600,
+                    modifier = Modifier.size(15.dp)
                 )
             }
         }
@@ -377,6 +452,107 @@ fun TrackingScreen(
             }
         }
     }
+}
+
+/**
+ * ✅ BARU — Dialog pilih driver pengganti.
+ * Menampilkan daftar kru aktif dari server, dengan indikator driver yang
+ * sedang aktif, loading state saat fetch, dan loading overlay saat submit.
+ */
+@Composable
+private fun GantiDriverDialog(
+    currentDriver: String,
+    daftarKru:     List<Kru>,
+    isLoading:     Boolean,
+    isSubmitting:  Boolean,
+    onPilih:       (Kru) -> Unit,
+    onDismiss:     () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        containerColor = Gray800,
+        title = {
+            Text("Ganti Driver", fontWeight = FontWeight.Bold, color = Color.White)
+        },
+        text = {
+            Box(modifier = Modifier.heightIn(min = 80.dp, max = 320.dp)) {
+                when {
+                    isLoading -> {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = Blue600, modifier = Modifier.size(28.dp))
+                        }
+                    }
+                    daftarKru.isEmpty() -> {
+                        Text(
+                            "Tidak ada data kru tersedia.",
+                            color = Gray400,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(vertical = 16.dp)
+                        )
+                    }
+                    else -> {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            items(daftarKru, key = { it.id }) { kru ->
+                                val isActive = kru.driver == currentDriver
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !isSubmitting && !isActive) { onPilih(kru) }
+                                        .background(
+                                            if (isActive) Blue600.copy(alpha = 0.15f) else Color.Transparent,
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            kru.driver,
+                                            fontSize = 14.sp,
+                                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isActive) Blue600 else Color.White
+                                        )
+                                        Text(
+                                            "@${kru.username}",
+                                            fontSize = 11.sp,
+                                            color = Gray500
+                                        )
+                                    }
+                                    if (isActive) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Check,
+                                            contentDescription = "Driver aktif",
+                                            tint = Blue600,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (isSubmitting) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(Gray800.copy(alpha = 0.85f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = Blue600, modifier = Modifier.size(28.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss, enabled = !isSubmitting) {
+                Text("Tutup", color = Gray300)
+            }
+        }
+    )
 }
 
 /**

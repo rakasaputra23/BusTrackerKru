@@ -2,16 +2,20 @@ package com.example.buskrutracker.api
 
 import com.example.buskrutracker.models.ApiResponse
 import com.example.buskrutracker.models.Armada
+import com.example.buskrutracker.models.GantiDriverRequest
+import com.example.buskrutracker.models.GantiDriverResponse
+import com.example.buskrutracker.models.Kru
 import com.example.buskrutracker.models.MulaiPerjalananResponse
 import com.example.buskrutracker.models.Perjalanan
 import com.example.buskrutracker.models.Rute
-import com.example.buskrutracker.models.SelesaiPerjalananRequest  // ← tambah import
+import com.example.buskrutracker.models.SelesaiPerjalananRequest
 import com.example.buskrutracker.models.SelesaiPerjalananResponse
-import com.example.buskrutracker.models.UpdateKondisiRequest       // ← tambah import
+import com.example.buskrutracker.models.UpdateKondisiRequest
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.POST
+import retrofit2.http.Path
 
 interface ApiService {
 
@@ -36,7 +40,6 @@ interface ApiService {
         @Body data: Map<String, Int>
     ): ApiResponse<MulaiPerjalananResponse>
 
-    // ✅ FIX: ganti Map<String, Any> → UpdateKondisiRequest
     @POST("api/kru/perjalanan/kondisi")
     suspend fun updateKondisi(
         @Header("Authorization") token: String,
@@ -49,17 +52,46 @@ interface ApiService {
         @Body data: Map<String, Int>
     ): ApiResponse<Perjalanan>
 
+    /**
+     * "Trip aktif milik SAYA (kru yang sedang login)".
+     * Backend query by kru_id = auth()->id(). Setelah ganti driver, kru
+     * LAMA tidak lagi punya trip aktif di sini — itu perilaku yang benar
+     * untuk endpoint ini. Pakai ini hanya saat device BELUM punya
+     * perjalanId tersimpan lokal (login fresh / belum pernah mulai trip).
+     */
     @GET("api/kru/perjalanan/aktif")
     suspend fun getPerjalananAktif(
         @Header("Authorization") token: String
     ): ApiResponse<Perjalanan>
 
-    // ✅ FIX: ganti Map<String, Any> → SelesaiPerjalananRequest
+    /**
+     * ✅ BARU — "trip dengan ID ini", tanpa peduli siapa kru yang login.
+     * Pakai ini kalau device SUDAH punya perjalanId tersimpan lokal
+     * (SharedPrefManager.hasActivePerjalanan() == true) — mis. setelah
+     * app di-restart di tengah trip yang sudah pindah driver.
+     */
+    @GET("api/kru/perjalanan/{id}")
+    suspend fun getPerjalananById(
+        @Header("Authorization") token: String,
+        @Path("id") perjalananId: Int
+    ): ApiResponse<Perjalanan>
+
     @POST("api/kru/perjalanan/selesai")
     suspend fun selesaiPerjalanan(
         @Header("Authorization") token: String,
         @Body data: SelesaiPerjalananRequest
     ): ApiResponse<SelesaiPerjalananResponse>
+
+    @GET("api/kru/list")
+    suspend fun getDaftarKru(
+        @Header("Authorization") token: String
+    ): ApiResponse<List<Kru>>
+
+    @POST("api/kru/perjalanan/ganti-driver")
+    suspend fun gantiDriver(
+        @Header("Authorization") token: String,
+        @Body data: GantiDriverRequest
+    ): ApiResponse<GantiDriverResponse>
 
     @POST("api/kru/logout")
     suspend fun logout(

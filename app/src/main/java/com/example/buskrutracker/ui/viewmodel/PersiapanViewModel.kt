@@ -30,7 +30,7 @@ sealed class PersiapanUiState {
         val namaBus:     String,
         val armadaNomor: String,
         val ruteNama:    String,
-        val kapasitas:   Int      // ✅ FIX: kapasitas ikut dibawa di state ini
+        val kapasitas:   Int
     ) : PersiapanUiState()
     data class Error(val message: String)   : PersiapanUiState()
     data class Toast(val message: String)   : PersiapanUiState()
@@ -123,11 +123,33 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
     // CHECK ACTIVE TRIP
     // ============================================
 
+    /**
+     * ✅ FIX: sekarang cek dua sumber, urut prioritas:
+     *
+     * 1. Device SUDAH punya perjalanId tersimpan lokal (hasActivePerjalanan())
+     *    → trip ini sedang berjalan DI HP INI, siapa pun driver terakhirnya
+     *      (bisa beda dari kru yang sekarang login token-nya, karena ganti
+     *      driver tidak memicu re-login). Query harus BY ID
+     *      (getPerjalananById), bukan by kru_id — kalau tetap pakai
+     *      getPerjalananAktif() yang by-kru, trip yang sudah dioper ke
+     *      driver lain akan terlihat "hilang" dan device bisa memulai trip
+     *      baru untuk armada yang sama → dua trip aktif dobel.
+     *
+     * 2. Device TIDAK punya perjalanId lokal → berarti benar-benar login
+     *    fresh, cek apakah kru yang login ini punya trip aktif yang dia
+     *    tinggalkan (mis. install ulang app, ganti device). Ini baru pakai
+     *    getPerjalananAktif() yang lama (by kru_id).
+     */
     fun checkActiveTrip() {
         val token = prefManager.getToken() ?: return
         viewModelScope.launch {
             try {
-                val response = apiService.getPerjalananAktif(token)
+                val response = if (prefManager.hasActivePerjalanan()) {
+                    apiService.getPerjalananById(token, prefManager.getPerjalanId())
+                } else {
+                    apiService.getPerjalananAktif(token)
+                }
+
                 if (response.isSuccess() && response.data != null) {
                     val p = response.data
                     val busInfo = p.armada?.let { a ->
@@ -137,6 +159,13 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
                     _uiState.value = PersiapanUiState.ActiveTripDetected(
                         ActiveTripInfo(p, busInfo, ruteInfo)
                     )
+                } else if (prefManager.hasActivePerjalanan()) {
+                    // perjalanId tersimpan lokal tapi ternyata sudah selesai/tidak ada
+                    // di server (mis. diselesaikan dari perangkat lain) → bersihkan
+                    // state lokal supaya tidak nyangkut selamanya.
+                    prefManager.clearPerjalanId()
+                    prefManager.clearFirebaseBusId()
+                    prefManager.setTracking(false)
                 }
             } catch (_: Exception) { /* silent */ }
         }
@@ -157,7 +186,7 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
                 val response = apiService.selesaiPerjalanan(token, request)
                 if (response.isSuccess()) {
                     prefManager.clearPerjalanId()
-                    prefManager.clearFirebaseBusId() // ✅ BERSIHKAN
+                    prefManager.clearFirebaseBusId()
                     prefManager.setTracking(false)
                     _uiState.value = PersiapanUiState.Toast("✓ Perjalanan lama dibatalkan.")
                 } else {
@@ -170,41 +199,40 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * ✅ FIX: resumeOldTrip sekarang restart GPS service dengan data dari perjalanan aktif,
-     * DAN meneruskan kapasitas armada yang sebenarnya (bukan default 40) ke TrackingScreen.
-     *
-     * firebaseBusId diambil dari armada.firebaseBusId yang ada di relasi perjalanan.
-     * Jika tidak ada (data lama), fallback ke SharedPref yang tersimpan sebelumnya.
+     * Restart GPS service dengan data dari perjalanan aktif, meneruskan
+     * kapasitas armada yang sebenarnya ke TrackingScreen.
      */
     fun resumeOldTrip(perjalanan: Perjalanan) {
         val kru = prefManager.getUser()
 
         val firebaseBusId = perjalanan.armada?.firebaseBusId
             ?.takeIf { it.isNotEmpty() }
-            ?: prefManager.getFirebaseBusId() // fallback ke SharedPref
+            ?: prefManager.getFirebaseBusId()
 
         prefManager.savePerjalanId(perjalanan.id)
         prefManager.setTracking(true)
 
-        // ✅ FIX: kapasitas asli dari relasi armada perjalanan aktif
         val kapasitasArmada = perjalanan.armada?.kapasitas ?: 40
 
-        // ✅ FIX: restart GPS service jika firebaseBusId tersedia
         if (firebaseBusId.isNotEmpty()) {
             prefManager.saveFirebaseBusId(firebaseBusId)
 
             val serviceIntent = GpsTrackingService.createStartIntent(
                 context       = context,
                 perjalanId    = perjalanan.id,
-                firebaseBusId = firebaseBusId,                        // ✅
+                firebaseBusId = firebaseBusId,
                 namaBus       = perjalanan.armada?.namaBus ?: "",
                 armadaNomor   = perjalanan.armada?.platNomor ?: "",
                 kelas         = perjalanan.armada?.kelas ?: "",
                 kapasitas     = kapasitasArmada,
                 ruteNama      = perjalanan.rute?.namaRute ?: "",
                 polyline      = perjalanan.rute?.polyline ?: "",
-                kruNama       = kru?.driver ?: "",
-                tarif         = perjalanan.tarifSnapshot
+                // ✅ FIX: pakai nama driver TERKINI dari data perjalanan
+                // (yang sedang tersimpan di database), bukan kru yang sedang
+                // login di device ini — supaya konsisten dengan "hasil kru
+                // yang terakhir" walau device dipegang driver berbeda.
+                kruNama       = perjalanan.kru?.driver ?: kru?.driver ?: "",
+                tarif         = perjalanan.tarifSnapshot ?: 0.0
             )
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(serviceIntent)
@@ -218,7 +246,7 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
             namaBus     = perjalanan.armada?.namaBus     ?: "",
             armadaNomor = perjalanan.armada?.platNomor   ?: "",
             ruteNama    = perjalanan.rute?.namaRute      ?: "",
-            kapasitas   = kapasitasArmada                 // ✅ FIX
+            kapasitas   = kapasitasArmada
         )
     }
 
@@ -240,11 +268,9 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
                     val perjalanan    = response.data.perjalanan!!
                     val tarif         = rute.getTarifHarga()
 
-                    // ✅ FIX: ambil firebaseBusId dari response API, bukan dari armada.firebaseBusId
-                    // (keduanya seharusnya sama, tapi response API adalah sumber kebenaran)
                     val firebaseBusId = response.data.firebaseBusId
                         .takeIf { it.isNotEmpty() }
-                        ?: armada.firebaseBusId // fallback ke field armada jika response kosong
+                        ?: armada.firebaseBusId.orEmpty()
 
                     if (firebaseBusId.isEmpty()) {
                         _uiState.value = PersiapanUiState.Error(
@@ -255,13 +281,12 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
 
                     prefManager.savePerjalanId(perjalanan.id)
                     prefManager.setTracking(true)
-                    prefManager.saveFirebaseBusId(firebaseBusId) // ✅ SIMPAN
+                    prefManager.saveFirebaseBusId(firebaseBusId)
 
-                    // Start GPS Service
                     val serviceIntent = GpsTrackingService.createStartIntent(
                         context       = context,
                         perjalanId    = perjalanan.id,
-                        firebaseBusId = firebaseBusId, // ✅ TERUSKAN ke service
+                        firebaseBusId = firebaseBusId,
                         namaBus       = armada.namaBus,
                         armadaNomor   = armada.platNomor,
                         kelas         = armada.kelas,
@@ -282,7 +307,7 @@ class PersiapanViewModel(application: Application) : AndroidViewModel(applicatio
                         namaBus     = armada.namaBus,
                         armadaNomor = armada.platNomor,
                         ruteNama    = rute.namaRute,
-                        kapasitas   = armada.kapasitas    // ✅ FIX: sumber kapasitas yang benar
+                        kapasitas   = armada.kapasitas
                     )
                 } else {
                     _uiState.value = PersiapanUiState.Error(

@@ -16,16 +16,19 @@ data class Rute(
     val kotaTujuan: String = "",
 
     @SerializedName("polyline")
-    val polyline: String = "",
+    val polyline: String = "", // aman — kolom NOT NULL di DB
 
+    // ✅ FIX: kolom "track_coordinates" nullable (json DEFAULT NULL) di DB
     @SerializedName("track_coordinates")
-    val trackCoordinates: List<TrackCoordinate> = emptyList(),
+    val trackCoordinates: List<TrackCoordinate>? = null,
 
+    // ✅ FIX: kolom "jarak" nullable (decimal DEFAULT NULL) di DB
     @SerializedName("jarak")
-    val jarak: String = "",
+    val jarak: String? = null,
 
+    // ✅ FIX: kolom "estimasi_waktu" nullable (smallint DEFAULT NULL) di DB
     @SerializedName("estimasi_waktu")
-    val estimasiWaktu: Int = 0,
+    val estimasiWaktu: Int? = null,
 
     @SerializedName("tarif")
     val tarif: TarifDetail? = null

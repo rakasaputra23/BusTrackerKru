@@ -190,6 +190,13 @@ class FirebaseManager {
             .addOnFailureListener { Log.e(TAG, "Failed to update kondisi: ${it.message}") }
     }
 
+    fun updateDriver(firebaseBusId: String, namaDriver: String) {
+        databaseRef.child("buses").child(firebaseBusId)
+            .child("driver").setValue(namaDriver)
+            .addOnSuccessListener { Log.d(TAG, "Driver updated: $namaDriver") }
+            .addOnFailureListener { Log.e(TAG, "Failed to update driver: ${it.message}") }
+    }
+
     // ============================================
     // CLEAR BUS DATA
     // ============================================

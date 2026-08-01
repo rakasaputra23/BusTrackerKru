@@ -11,6 +11,8 @@ import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.buskrutracker.api.RetrofitClient
+import com.example.buskrutracker.models.GantiDriverRequest
+import com.example.buskrutracker.models.Kru
 import com.example.buskrutracker.models.SelesaiPerjalananResponse
 import com.example.buskrutracker.models.SelesaiPerjalananRequest
 import com.example.buskrutracker.models.UpdateKondisiRequest
@@ -80,6 +82,23 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
     private val _networkAvailable = MutableStateFlow(true)
     val networkAvailable: StateFlow<Boolean> = _networkAvailable
 
+    // ✅ state driver aktif & daftar kru untuk fitur ganti driver
+    private val _currentDriver = MutableStateFlow("")
+    val currentDriver: StateFlow<String> = _currentDriver
+
+    // ✅ BARU — simpan ID driver aktif (bukan cuma nama), untuk perbandingan yang akurat
+    private val _currentDriverId = MutableStateFlow<Int?>(null)
+    val currentDriverId: StateFlow<Int?> = _currentDriverId
+
+    private val _daftarKru = MutableStateFlow<List<Kru>>(emptyList())
+    val daftarKru: StateFlow<List<Kru>> = _daftarKru
+
+    private val _isLoadingKru = MutableStateFlow(false)
+    val isLoadingKru: StateFlow<Boolean> = _isLoadingKru
+
+    private val _isGantiDriverLoading = MutableStateFlow(false)
+    val isGantiDriverLoading: StateFlow<Boolean> = _isGantiDriverLoading
+
     private var totalPassengersBoarded = 0
     private var perjalanId = 0
 
@@ -124,9 +143,6 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
         loadPerjalananAktif()
     }
 
-    // ✅ DIPERBAIKI — pakai ContextCompat.registerReceiver, otomatis handle
-    // perbedaan API level (Tiramisu+) tanpa if/else manual, dan lint tidak
-    // lagi menandai "missing RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED flag".
     private fun registerReceiver() {
         try {
             ContextCompat.registerReceiver(
@@ -165,7 +181,6 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
     // PERSIST BOARDED COUNT
     // ============================================
 
-    // ✅ DIPERBAIKI — pakai KTX extension `edit {}` (auto commit/apply, lebih ringkas)
     private fun saveBoardedCount() {
         trackingPrefs.edit { putInt("boarded_$perjalanId", totalPassengersBoarded) }
     }
@@ -182,16 +197,24 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
     // LOAD AKTIF
     // ============================================
 
+    // ✅ FIX: pakai getPerjalananById(this.perjalanId), BUKAN getPerjalananAktif().
+    // ViewModel ini sudah tahu perjalanId-nya sendiri lewat init() — query
+    // "trip milik kru yang sedang login" (getPerjalananAktif) salah dipakai
+    // di sini, karena kalau device sudah oper ke driver lain lewat
+    // gantiDriver(), token yang tersimpan bukan lagi kru_id yang sekarang
+    // tercatat di baris perjalanan → data akan gagal ditemukan / salah.
     private fun loadPerjalananAktif() {
         val token = prefManager.getToken() ?: return
         viewModelScope.launch {
             try {
-                val response = apiService.getPerjalananAktif(token)
+                val response = apiService.getPerjalananById(token, perjalanId)
                 if (response.isSuccess() && response.data != null) {
                     val p = response.data
                     _jumlahPenumpang.value = p.totalPenumpang
                     _kapasitas.value       = p.armada?.kapasitas ?: 40
                     _kondisi.value         = p.kondisiTerakhir.ifEmpty { "lancar" }
+                    _currentDriver.value   = p.kru?.driver.orEmpty()
+                    _currentDriverId.value = p.kru?.id // ✅ BARU — simpan id juga
                 }
             } catch (_: Exception) {}
         }
@@ -263,6 +286,108 @@ class TrackingViewModel(application: Application) : AndroidViewModel(application
                     _uiState.value = TrackingUiState.Toast("$emoji Status: ${kondisi.uppercase()}")
                 }
             } catch (_: Exception) {}
+        }
+    }
+
+    // ============================================
+    // ✅ GANTI DRIVER (dioptimasi)
+    // ============================================
+
+    /** Ambil daftar kru aktif dari server untuk ditampilkan di dialog pilihan. */
+    fun loadDaftarKru() {
+        val token = prefManager.getToken() ?: return
+        viewModelScope.launch {
+            _isLoadingKru.value = true
+            try {
+                val response = apiService.getDaftarKru(token)
+                if (response.isSuccess() && response.data != null) {
+                    _daftarKru.value = response.data
+                } else {
+                    _uiState.value = TrackingUiState.Toast("⚠️ Gagal ambil daftar kru")
+                }
+            } catch (e: Exception) {
+                _uiState.value = TrackingUiState.Toast("❌ Koneksi error: ${e.message}")
+            } finally {
+                _isLoadingKru.value = false
+            }
+        }
+    }
+
+    /**
+     * Ganti driver aktif ke kru yang dipilih. Update dilakukan ke:
+     * 1. Backend Laravel (kolom kru_id di tabel perjalanan)
+     * 2. Firebase Realtime Database (field driver, real-time untuk app penumpang & web)
+     *
+     * Perbaikan dari versi sebelumnya:
+     * - Guard `_isGantiDriverLoading`: mencegah user nge-tap 2 kru berbeda secara
+     *   cepat berturut-turut, yang sebelumnya memicu 2 request paralel dan response
+     *   yang datang belakangan bisa "menimpa" pilihan yang lebih baru (race condition
+     *   -> terlihat seperti salah pilih / nge-bug).
+     * - Perbandingan "tidak ada perubahan" sekarang pakai ID kru (`kruBaru.id`),
+     *   bukan nama (`driver: String`) yang rawan false-positive kalau ada nama sama.
+     * - Kalau user memilih driver yang sama, sekarang dikasih toast feedback
+     *   ("driver ini sudah aktif") alih-alih diam-diam return tanpa reaksi apa pun.
+     * - Optimistic update: nama driver di UI langsung diganti saat request dikirim,
+     *   supaya dialog/tombol terasa responsif; kalau request gagal, otomatis di-rollback
+     *   ke driver & id sebelumnya.
+     */
+    fun gantiDriver(kruBaru: Kru) {
+        // Guard: cegah request ganda kalau masih ada proses ganti driver berjalan
+        if (_isGantiDriverLoading.value) {
+            _uiState.value = TrackingUiState.Toast("⏳ Tunggu proses sebelumnya selesai")
+            return
+        }
+
+        // Bandingkan pakai ID, bukan nama, biar akurat
+        if (kruBaru.id == _currentDriverId.value) {
+            _uiState.value = TrackingUiState.Toast("ℹ️ Driver ini sudah aktif")
+            return
+        }
+
+        val token = prefManager.getToken() ?: return
+
+        // Simpan state lama untuk rollback jika gagal
+        val previousDriverName = _currentDriver.value
+        val previousDriverId   = _currentDriverId.value
+
+        // Optimistic update — biar dialog langsung terasa responsif
+        _currentDriver.value   = kruBaru.driver
+        _currentDriverId.value = kruBaru.id
+
+        viewModelScope.launch {
+            _isGantiDriverLoading.value = true
+            try {
+                val response = apiService.gantiDriver(
+                    token,
+                    GantiDriverRequest(perjalananId = perjalanId, kruIdBaru = kruBaru.id)
+                )
+                if (response.isSuccess() && response.data != null) {
+                    // Sinkronkan dengan nilai final dari server (jaga-jaga beda format)
+                    _currentDriver.value   = response.data.driverBaru
+                    _currentDriverId.value = kruBaru.id
+
+                    context.startService(
+                        GpsTrackingService.createDriverUpdateIntent(
+                            context, perjalanId, response.data.driverBaru
+                        )
+                    )
+                    _uiState.value = TrackingUiState.Toast("✓ Driver diganti: ${response.data.driverBaru}")
+                } else {
+                    // Rollback optimistic update kalau backend menolak
+                    _currentDriver.value   = previousDriverName
+                    _currentDriverId.value = previousDriverId
+                    _uiState.value = TrackingUiState.Toast(
+                        response.message.ifEmpty { "❌ Gagal ganti driver" }
+                    )
+                }
+            } catch (e: Exception) {
+                // Rollback optimistic update kalau ada exception (network dsb)
+                _currentDriver.value   = previousDriverName
+                _currentDriverId.value = previousDriverId
+                _uiState.value = TrackingUiState.Toast("❌ Error: ${e.message}")
+            } finally {
+                _isGantiDriverLoading.value = false
+            }
         }
     }
 

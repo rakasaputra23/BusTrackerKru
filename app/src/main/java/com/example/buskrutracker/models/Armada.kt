@@ -21,14 +21,18 @@ data class Armada(
     @SerializedName("status")
     val status: String = "",
 
+    // ✅ FIX: kolom "firebase_bus_id" nullable di DB (DEFAULT NULL untuk armada
+    // yang belum diassign ke Firebase). Non-null String sebelumnya berisiko
+    // null-crash saat deserialisasi Gson.
     @SerializedName("firebase_bus_id")
-    val firebaseBusId: String = "",
+    val firebaseBusId: String? = null,
 
+    // ✅ FIX: timestamp nullable di DB
     @SerializedName("created_at")
-    val createdAt: String = "",
+    val createdAt: String? = null,
 
     @SerializedName("updated_at")
-    val updatedAt: String = ""
+    val updatedAt: String? = null
 ) {
     // Untuk Dropdown Compose — menggantikan toString() di Spinner
     fun displayName(): String =

@@ -63,10 +63,14 @@ class GpsTrackingService : Service() {
         const val ACTION_UPDATE_PASSENGERS = "UPDATE_PASSENGERS"
         const val ACTION_UPDATE_KONDISI    = "UPDATE_KONDISI"
         const val ACTION_UPDATE_BOARDED    = "UPDATE_BOARDED"
+        // ✅ BARU — action untuk ganti driver di tengah perjalanan aktif
+        const val ACTION_UPDATE_DRIVER     = "UPDATE_DRIVER"
 
         // Extras
         const val EXTRA_PERJALANAN_ID    = "perjalanan_id"
         const val EXTRA_FIREBASE_BUS_ID  = "firebase_bus_id"
+        // ✅ BARU
+        const val EXTRA_DRIVER_NAME      = "driver_nama"
 
         // broadcast actions untuk status device (LOCAL saja, tidak menyentuh Firebase)
         const val ACTION_GPS_STATUS_UPDATE     = "GPS_STATUS_UPDATE"
@@ -127,6 +131,15 @@ class GpsTrackingService : Service() {
             action = ACTION_UPDATE_KONDISI
             putExtra(EXTRA_PERJALANAN_ID, perjalanId)
             putExtra("kondisi",           kondisi)
+        }
+
+        // ✅ BARU — mengikuti pola createKondisiUpdateIntent persis
+        fun createDriverUpdateIntent(
+            context: Context, perjalanId: Int, namaDriverBaru: String
+        ): Intent = Intent(context, GpsTrackingService::class.java).apply {
+            action = ACTION_UPDATE_DRIVER
+            putExtra(EXTRA_PERJALANAN_ID, perjalanId)
+            putExtra(EXTRA_DRIVER_NAME,   namaDriverBaru)
         }
     }
 
@@ -194,6 +207,7 @@ class GpsTrackingService : Service() {
             ACTION_UPDATE_PASSENGERS -> handleUpdatePassengers(intent)
             ACTION_UPDATE_KONDISI    -> handleUpdateKondisi(intent)
             ACTION_UPDATE_BOARDED    -> handleUpdateBoarded(intent)
+            ACTION_UPDATE_DRIVER     -> handleUpdateDriver(intent) // ✅ BARU
         }
         return START_STICKY
     }
@@ -315,6 +329,21 @@ class GpsTrackingService : Service() {
         if (kondisi.isNotEmpty() && firebaseBusId.isNotEmpty()) {
             firebaseManager.updateKondisi(firebaseBusId, kondisi)
         }
+    }
+
+    /**
+     * ✅ BARU — handle ganti driver di tengah perjalanan aktif.
+     * Update kruNama lokal (biar konsisten kalau ada log/notifikasi lain yang
+     * memakainya) lalu tulis ke Firebase supaya app penumpang & web dashboard
+     * langsung menampilkan driver baru secara real-time.
+     */
+    private fun handleUpdateDriver(intent: Intent) {
+        val namaDriverBaru = intent.getStringExtra(EXTRA_DRIVER_NAME) ?: return
+        if (namaDriverBaru.isEmpty() || firebaseBusId.isEmpty()) return
+
+        kruNama = namaDriverBaru
+        firebaseManager.updateDriver(firebaseBusId, namaDriverBaru)
+        Log.d(TAG, "Driver diganti menjadi: $namaDriverBaru")
     }
 
     // ============================================

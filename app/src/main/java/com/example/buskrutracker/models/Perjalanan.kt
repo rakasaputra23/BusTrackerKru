@@ -16,38 +16,45 @@ data class Perjalanan(
     val ruteId: Int = 0,
 
     @SerializedName("waktu_mulai")
-    val waktuMulai: String = "",
+    val waktuMulai: String = "", // aman — kolom NOT NULL di DB
 
+    // ✅ FIX: kolom "waktu_selesai" nullable (datetime DEFAULT NULL) — pasti null
+    // selagi perjalanan masih berstatus "aktif"
     @SerializedName("waktu_selesai")
-    val waktuSelesai: String = "",
+    val waktuSelesai: String? = null,
 
     @SerializedName("total_penumpang")
-    val totalPenumpang: Int = 0,
+    val totalPenumpang: Int = 0, // aman — NOT NULL DEFAULT 0
 
+    // ✅ FIX: kolom "jarak_tempuh" nullable (decimal DEFAULT NULL)
     @SerializedName("jarak_tempuh")
-    val jarakTempuh: String = "",
+    val jarakTempuh: String? = null,
 
+    // ✅ FIX: kolom "durasi_menit" nullable (smallint DEFAULT NULL)
     @SerializedName("durasi_menit")
-    val durasiMenit: Int = 0,
+    val durasiMenit: Int? = null,
 
     @SerializedName("status")
-    val status: String = "",
+    val status: String = "", // aman — NOT NULL DEFAULT 'aktif'
 
     @SerializedName("kondisi_terakhir")
-    val kondisiTerakhir: String = "lancar",
+    val kondisiTerakhir: String = "lancar", // aman — NOT NULL DEFAULT 'lancar'
 
+    // ✅ FIX: kolom "catatan" nullable (varchar DEFAULT NULL)
     @SerializedName("catatan")
-    val catatan: String = "",
+    val catatan: String? = null,
 
     // Field pendapatan
+    // ✅ FIX: kolom "tarif_snapshot" nullable (decimal DEFAULT NULL) — bisa null
+    // kalau tarif tidak ditemukan saat mulaiPerjalanan()
     @SerializedName("tarif_snapshot")
-    val tarifSnapshot: Double = 0.0,
+    val tarifSnapshot: Double? = null,
 
     @SerializedName("total_penumpang_naik")
-    val totalPenumpangNaik: Int = 0,
+    val totalPenumpangNaik: Int = 0, // aman — NOT NULL DEFAULT 0
 
     @SerializedName("total_pendapatan")
-    val totalPendapatan: Double = 0.0,
+    val totalPendapatan: Double = 0.0, // aman — NOT NULL DEFAULT 0.00
 
     // Relations
     @SerializedName("kru")
